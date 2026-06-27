@@ -87,12 +87,6 @@ export class VideoRecorder {
       this.mediaRecorder.onstop = () => {
         console.log('[VideoRecorder] 录制已停止，正在打包生成视频文件...');
         
-        // 确定最终生成的文件类型后缀
-        let extension = 'webm';
-        if (this.mimeType.includes('video/mp4')) {
-          extension = 'mp4';
-        }
-        
         const videoBlob = new Blob(this.recordedChunks, {
           type: this.mimeType || 'video/webm'
         });

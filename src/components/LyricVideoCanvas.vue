@@ -2,12 +2,13 @@
 import { ref, onMounted, onUnmounted, watch, computed } from 'vue'
 import { Icon } from '@iconify/vue'
 import { parseLrc, type LrcLine } from '../utils/lrcParser'
-import { VideoRecorder } from '../utils/VideoRecorder'
+import { FastVideoEncoder } from '../utils/FastVideoEncoder'
 
 // ——— 音频和歌词文件状态 ———
 const audioFile = ref<File | null>(null)
 const lrcFile = ref<File | null>(null)
 const bgImageFile = ref<File | null>(null)
+const decodedAudioBuffer = ref<AudioBuffer | null>(null)
 
 const audioUrl = ref<string>('')
 const lrcContent = ref<string>('')
@@ -32,6 +33,7 @@ const recordProgress = ref(0)
 const isAudioLoaded = ref(false)
 const showNotification = ref(false)
 const notificationText = ref('')
+const showOverflowModal = ref(false)
 
 // ——— DOM & 绘图句柄 ———
 const audioRef = ref<HTMLAudioElement | null>(null)
@@ -64,6 +66,36 @@ const canvasHeight = computed(() => {
   return parseInt(h) || 720
 })
 
+// 计算当前配置下是否有歌词溢出画布边界
+const overflowState = computed(() => {
+  if (lrcLines.value.length === 0) return { hasOverflow: false, count: 0, lines: [] }
+  
+  // 创建临时 canvas 测量，不污染主画面
+  const tempCanvas = document.createElement('canvas')
+  const tempCtx = tempCanvas.getContext('2d')
+  if (!tempCtx) return { hasOverflow: false, count: 0, lines: [] }
+  
+  tempCtx.font = `bold ${fontSize.value}px ${textFont.value}`
+  const maxW = canvasWidth.value * 0.98 // 预留左右 1% 的安全边距
+  const lines: { index: number; text: string; time: number }[] = []
+  
+  lrcLines.value.forEach((line, index) => {
+    if (tempCtx.measureText(line.text).width > maxW) {
+      lines.push({
+        index: index + 1,
+        text: line.text,
+        time: line.time
+      })
+    }
+  })
+  
+  return {
+    hasOverflow: lines.length > 0,
+    count: lines.length,
+    lines
+  }
+})
+
 // ——— 消息提示工具 ———
 function notify(text: string) {
   notificationText.value = text
@@ -83,6 +115,25 @@ function onAudioUpload(event: Event) {
     isAudioLoaded.value = false
     isPlaying.value = false
     currentTime.value = 0
+    decodedAudioBuffer.value = null
+
+    // 异步离线解码音频数据，以便绘制波形图与视频合成使用
+    const reader = new FileReader()
+    reader.onload = async (e) => {
+      const arrayBuffer = e.target?.result as ArrayBuffer
+      if (!arrayBuffer) return
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext
+      const ctx = new AudioContextClass()
+      try {
+        decodedAudioBuffer.value = await ctx.decodeAudioData(arrayBuffer)
+      } catch (err) {
+        console.error('音频解码失败:', err)
+      } finally {
+        await ctx.close()
+      }
+    }
+    reader.readAsArrayBuffer(file)
+
     notify(`歌曲导入成功: ${file.name}`)
   }
 }
@@ -211,6 +262,17 @@ function seekAudio(event: Event) {
   }
 }
 
+// 跳转到指定时间段并更新画面与关闭弹窗
+function jumpToTime(time: number) {
+  if (audioRef.value) {
+    audioRef.value.currentTime = time
+    currentTime.value = time
+    drawFrame()
+  }
+  showOverflowModal.value = false
+  notify(`已跳转至 ${Math.floor(time / 60)}:${String(Math.floor(time % 60)).padStart(2, '0')}`)
+}
+
 // 循环渲染帧
 function loop() {
   if (!isPlaying.value && !isRecording.value) return
@@ -222,7 +284,7 @@ function loop() {
 }
 
 // ——— 核心 Canvas 绘制逻辑 ———
-function drawFrame() {
+function drawFrame(timeOverride?: number) {
   const canvas = canvasRef.value
   if (!canvas) return
   const ctx = canvas.getContext('2d')
@@ -260,12 +322,43 @@ function drawFrame() {
     ctx.fillRect(0, 0, W, H)
   }
 
-  // 2. 绘制音频波形起伏线
-  if (analyserNode) {
-    const bufferLength = analyserNode.frequencyBinCount
-    const dataArray = new Uint8Array(bufferLength)
-    analyserNode.getByteFrequencyData(dataArray)
+  const timeNow = timeOverride !== undefined ? timeOverride : currentTime.value
+  if (timeOverride !== undefined) {
+    currentTime.value = timeOverride
+  }
 
+  // 2. 绘制音频波形起伏线
+  let dataArray: Uint8Array | null = null
+  let bufferLength = 128
+  
+  if (timeOverride !== undefined && decodedAudioBuffer.value) {
+    // 离线状态：从 decodedAudioBuffer 中提取当前时间点附近的波形
+    const buffer = decodedAudioBuffer.value
+    const sampleRate = buffer.sampleRate
+    const channelData = buffer.getChannelData(0) // 使用左声道
+    const currentSample = Math.floor(timeNow * sampleRate)
+    
+    bufferLength = 128
+    dataArray = new Uint8Array(bufferLength)
+    
+    for (let i = 0; i < bufferLength; i++) {
+      // 采样当前时间点附近的一小段音频数据 (采样间隔稍微拉开点以形成好看的波形)
+      const sampleIdx = currentSample + i * 16
+      if (sampleIdx < channelData.length && sampleIdx >= 0) {
+        const val = Math.abs(channelData[sampleIdx])
+        dataArray[i] = Math.min(255, Math.floor(val * 512)) // 放大一些以便显示
+      } else {
+        dataArray[i] = 0
+      }
+    }
+  } else if (analyserNode) {
+    // 在线状态：从分析器读取实时频率
+    bufferLength = analyserNode.frequencyBinCount
+    dataArray = new Uint8Array(bufferLength)
+    analyserNode.getByteFrequencyData(dataArray as any)
+  }
+
+  if (dataArray) {
     ctx.lineWidth = 3
     ctx.strokeStyle = `rgba(244, 63, 94, 0.35)` // 半透明玫瑰粉
     ctx.beginPath()
@@ -301,8 +394,6 @@ function drawFrame() {
     ctx.fillText('上传歌曲和歌词，在此预览效果', W / 2, H / 2)
     return
   }
-
-  const timeNow = currentTime.value
   
   // 查找当前应该播放的歌词行索引
   let currentIdx = -1
@@ -428,9 +519,9 @@ function drawKaraokeLine(ctx: CanvasRenderingContext2D, line: LrcLine, x: number
   }
 }
 
-// ——— 核心合成录制逻辑 ———
+// ——— 核心合成录制逻辑 (修改为 WebCodecs 离线倍速压制版) ———
 async function startRecording() {
-  if (!audioRef.value || !isAudioLoaded.value) {
+  if (!audioFile.value || !isAudioLoaded.value) {
     notify('请上传音频文件后再进行合成')
     return
   }
@@ -438,71 +529,57 @@ async function startRecording() {
     notify('请上传歌词文件后再进行合成')
     return
   }
+  if (!canvasRef.value) return
 
-  // 1. 初始化 Web Audio 环境
-  initWebAudio()
-  if (audioCtx && audioCtx.state === 'suspended') {
-    await audioCtx.resume()
-  }
-
-  // 2. 进入录制状态
+  // 1. 进入录制状态
   isRecording.value = true
   isPlaying.value = false
   recordProgress.value = 0
 
-  // 3. 重置音频播放状态
-  audioRef.value.pause()
-  audioRef.value.currentTime = 0
-  currentTime.value = 0
+  // 停止音频播放器
+  if (audioRef.value) {
+    audioRef.value.pause()
+  }
 
-  // 4. 将扬声器的输出音量调整为 0 (录制静音合成，体验极佳，防止录制时环境嘈杂)
-  if (gainNode) gainNode.gain.value = 0
+  try {
+    // 2. 初始化离线快速编码器
+    const encoder = new FastVideoEncoder({
+      canvas: canvasRef.value,
+      audioFile: audioFile.value,
+      duration: duration.value,
+      fps: 30,
+      width: canvasWidth.value,
+      height: canvasHeight.value,
+      drawFrameAtTime: (_, timestamp) => {
+        // 传递 timestamp 给 drawFrame，实现非实时画面离线精确绘制
+        drawFrame(timestamp)
+      },
+      onProgress: (progress) => {
+        recordProgress.value = progress
+      }
+    })
 
-  // 5. 实例化录制引擎
-  if (!canvasRef.value || !mediaStreamDest) return
-  const recorder = new VideoRecorder(canvasRef.value, mediaStreamDest.stream)
-  
-  // 6. 启动录制和音频播放
-  recorder.start()
-  audioRef.value.play()
-  isPlaying.value = true
-  loop()
+    // 3. 执行视频导出
+    const videoBlob = await encoder.encode()
 
-  // 7. 进度条监控轮询
-  const progressTimer = setInterval(() => {
-    if (audioRef.value) {
-      const pct = Math.min(100, Math.floor((audioRef.value.currentTime / duration.value) * 100))
-      recordProgress.value = pct
-    }
-  }, 300)
-
-  // 8. 监听音频播放结束，触发保存
-  audioRef.value.onended = async () => {
-    clearInterval(progressTimer)
-    isPlaying.value = false
-    
-    // 停止录制并生成 Blob
-    const videoBlob = await recorder.stop()
-    isRecording.value = false
-    
-    // 恢复扬声器音量
-    if (gainNode) gainNode.gain.value = 1
-
-    // 触发浏览器下载
-    const ext = recorder.getFileExtension()
+    // 4. 触发浏览器下载
     const url = URL.createObjectURL(videoBlob)
     const a = document.createElement('a')
     a.href = url
     
     // 以歌曲名命名
     const songName = audioFile.value ? audioFile.value.name.replace(/\.[^.]+$/, '') : 'lyric_video'
-    a.download = `${songName}_karaoke.${ext}`
+    a.download = `${songName}_karaoke.mp4`
     a.click()
 
     notify('视频合成完成，已触发下载！')
-    
-    // 清空 onended 监听器
-    if (audioRef.value) audioRef.value.onended = null
+  } catch (error) {
+    console.error('合成失败:', error)
+    notify(`合成出错: ${error instanceof Error ? error.message : String(error)}`)
+  } finally {
+    isRecording.value = false
+    // 恢复画面预览
+    drawFrame()
   }
 }
 
@@ -621,7 +698,13 @@ onUnmounted(() => {
                 <span>歌词大小</span>
                 <span class="text-rose-400 font-bold">{{ fontSize }}px</span>
               </div>
-              <input type="range" min="30" max="100" v-model.number="fontSize" @input="drawFrame" class="w-full h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-rose-500" />
+              <input type="range" min="30" max="200" v-model.number="fontSize" @input="drawFrame()" class="w-full h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-rose-500" />
+              
+              <!-- 溢出智能提示 (点击可查看详情) -->
+              <div v-if="overflowState.hasOverflow" @click="showOverflowModal = true" class="bg-amber-950/40 border border-amber-500/30 text-amber-300 text-xs p-3 rounded-2xl flex items-center gap-2 mt-1 cursor-pointer hover:bg-amber-900/20 transition-all select-none">
+                <Icon icon="solar:danger-triangle-bold" class="text-amber-500 text-base flex-shrink-0 animate-pulse" />
+                <span class="flex-1">当前字号有 <strong>{{ overflowState.count }}</strong> 行歌词超出画面边界，导出后可能会被裁剪。<span class="underline ml-1 font-semibold text-amber-400">点击查看详情</span></span>
+              </div>
             </div>
 
             <!-- 描边粗细滑块 -->
@@ -630,7 +713,7 @@ onUnmounted(() => {
                 <span>字体描边粗细</span>
                 <span class="text-rose-400 font-bold">{{ strokeWidth }}px</span>
               </div>
-              <input type="range" min="0" max="10" v-model.number="strokeWidth" @input="drawFrame" class="w-full h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-rose-500" />
+              <input type="range" min="0" max="10" v-model.number="strokeWidth" @input="drawFrame()" class="w-full h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-rose-500" />
             </div>
 
             <!-- 颜色选取器双列 -->
@@ -638,14 +721,14 @@ onUnmounted(() => {
               <div class="flex flex-col gap-1.5">
                 <span class="text-xs font-semibold text-slate-400 uppercase">未唱文字颜色</span>
                 <div class="flex items-center gap-2 bg-slate-950/30 p-2 rounded-xl border border-slate-800">
-                  <input type="color" v-model="unsungColor" @input="drawFrame" class="w-8 h-8 rounded border-0 bg-transparent cursor-pointer" />
+                  <input type="color" v-model="unsungColor" @input="drawFrame()" class="w-8 h-8 rounded border-0 bg-transparent cursor-pointer" />
                   <span class="text-xs font-mono text-slate-300">{{ unsungColor.toUpperCase() }}</span>
                 </div>
               </div>
               <div class="flex flex-col gap-1.5">
                 <span class="text-xs font-semibold text-slate-400 uppercase">已唱扫光颜色</span>
                 <div class="flex items-center gap-2 bg-slate-950/30 p-2 rounded-xl border border-slate-800">
-                  <input type="color" v-model="sungColor" @input="drawFrame" class="w-8 h-8 rounded border-0 bg-transparent cursor-pointer" />
+                  <input type="color" v-model="sungColor" @input="drawFrame()" class="w-8 h-8 rounded border-0 bg-transparent cursor-pointer" />
                   <span class="text-xs font-mono text-slate-300">{{ sungColor.toUpperCase() }}</span>
                 </div>
               </div>
@@ -747,6 +830,47 @@ onUnmounted(() => {
         </button>
 
       </div>
+      
+      <!-- 溢出歌词详情弹窗 -->
+      <Transition name="modal-fade">
+        <div v-if="showOverflowModal" class="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-md p-4">
+          <div class="bg-slate-900 border border-slate-800 w-full max-w-lg rounded-3xl p-6 shadow-2xl flex flex-col gap-4 animate-scale-up">
+            <div class="flex justify-between items-center border-b border-slate-800 pb-3">
+              <h3 class="text-lg font-bold text-slate-100 flex items-center gap-2">
+                <Icon icon="solar:danger-triangle-bold" class="text-amber-500" />
+                溢出歌词列表 (共 {{ overflowState.count }} 行)
+              </h3>
+              <button @click="showOverflowModal = false" class="w-8 h-8 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-slate-200 flex items-center justify-center transition-all cursor-pointer border-0">
+                <Icon icon="solar:close-circle-bold" class="text-lg" />
+              </button>
+            </div>
+            
+            <div class="max-h-[300px] overflow-y-auto pr-2 flex flex-col gap-2">
+              <div 
+                v-for="line in overflowState.lines" 
+                :key="line.index" 
+                @click="jumpToTime(line.time)"
+                class="bg-slate-950/40 border border-slate-850 p-3 rounded-xl flex items-start gap-3 hover:border-rose-500/50 hover:bg-slate-900 cursor-pointer transition-all active:scale-[0.99] group"
+              >
+                <span class="text-xs font-mono font-bold bg-slate-850 text-slate-400 group-hover:text-rose-400 px-2 py-0.5 rounded flex-shrink-0">#{{ line.index }}</span>
+                <div class="flex-1 min-w-0">
+                  <p class="text-sm font-semibold text-slate-200 group-hover:text-white transition-colors break-words leading-relaxed">{{ line.text }}</p>
+                  <p class="text-[10px] text-slate-500 group-hover:text-rose-400 font-mono mt-1 flex items-center gap-1 transition-colors">
+                    <Icon icon="solar:clock-circle-bold" />
+                    时间轴位置: {{ Math.floor(line.time / 60) }}:{{ String(Math.floor(line.time % 60)).padStart(2, '0') }} (点击跳转)
+                  </p>
+                </div>
+              </div>
+            </div>
+            
+            <div class="flex justify-end pt-2">
+              <button @click="showOverflowModal = false" class="px-5 py-2.5 rounded-2xl bg-rose-500 hover:bg-rose-600 text-white font-bold text-sm cursor-pointer transition-all active:scale-95 border-0">
+                知道了
+              </button>
+            </div>
+          </div>
+        </div>
+      </Transition>
 
     </div>
   </div>
@@ -778,5 +902,32 @@ onUnmounted(() => {
 .fade-leave-to {
   opacity: 0;
   transform: translate(-50%, -20px);
+}
+
+/* 弹窗淡入淡出 */
+.modal-fade-enter-active,
+.modal-fade-leave-active {
+  transition: opacity 0.25s ease;
+}
+
+.modal-fade-enter-from,
+.modal-fade-leave-to {
+  opacity: 0;
+}
+
+/* 弹窗缩放动画 */
+.animate-scale-up {
+  animation: scaleUp 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+
+@keyframes scaleUp {
+  from {
+    transform: scale(0.95);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
 }
 </style>
