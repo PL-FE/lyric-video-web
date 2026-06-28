@@ -7,7 +7,7 @@ export interface FastVideoEncoderOptions {
   fps?: number;
   width: number;
   height: number;
-  drawFrameAtTime: (ctx: CanvasRenderingContext2D, time: number) => void;
+  drawFrameAtTime: (ctx: CanvasRenderingContext2D, time: number) => void | Promise<void>;
   onProgress?: (progress: number) => void;
 }
 
@@ -18,7 +18,7 @@ export class FastVideoEncoder {
   private fps: number;
   private width: number;
   private height: number;
-  private drawFrameAtTime: (ctx: CanvasRenderingContext2D, time: number) => void;
+  private drawFrameAtTime: (ctx: CanvasRenderingContext2D, time: number) => void | Promise<void>;
   private onProgress?: (progress: number) => void;
 
   constructor(options: FastVideoEncoderOptions) {
@@ -145,7 +145,7 @@ export class FastVideoEncoder {
       const timestamp = frameIndex * frameInterval;
 
       // 离线渲染该帧画面
-      this.drawFrameAtTime(ctx, timestamp);
+      await this.drawFrameAtTime(ctx, timestamp);
 
       // 创建 WebCodecs VideoFrame
       const videoFrame = new VideoFrame(this.canvas, {

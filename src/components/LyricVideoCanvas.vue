@@ -7,8 +7,40 @@ import { FastVideoEncoder } from '../utils/FastVideoEncoder'
 // ——— 音频和歌词文件状态 ———
 const audioFile = ref<File | null>(null)
 const lrcFile = ref<File | null>(null)
-const bgImageFile = ref<File | null>(null)
+const bgVideoFile = ref<File | null>(null)
+const bgVideoUrl = ref('')
+const bgVideoRef = ref<HTMLVideoElement | null>(null)
 const decodedAudioBuffer = ref<AudioBuffer | null>(null)
+
+// ——— 新增的可定制背景与封面配置 ———
+const bgMode = ref<'image' | 'video'>('image')
+const lrcLinesToShow = ref<number>(2) // 默认 2 行
+const showCover = ref<boolean>(true)
+const coverTitle = ref<string>('')
+const coverSubtitle = ref<string>('')
+
+// ——— 预置背景图片数组 ———
+const presetImageUrls = [
+  './preset_bgs/bg1.jpg',
+  './preset_bgs/bg2.jpg',
+  './preset_bgs/bg3.jpg',
+  './preset_bgs/bg4.jpg',
+  './preset_bgs/bg5.jpg',
+  './preset_bgs/bg6.jpg',
+  './preset_bgs/bg7.jpg',
+  './preset_bgs/bg8.jpg',
+  './preset_bgs/bg9.jpg',
+  './preset_bgs/bg10.jpg',
+  './preset_bgs/bg11.jpg',
+  './preset_bgs/bg12.jpg',
+  './preset_bgs/bg13.jpg',
+  './preset_bgs/bg14.jpg',
+  './preset_bgs/bg15.jpg'
+]
+
+const uploadedImageFiles = ref<File[]>([])
+const uploadedImageUrlList = ref<string[]>([])
+const uploadedImageElements = ref<HTMLImageElement[]>([])
 
 const audioUrl = ref<string>('')
 const lrcContent = ref<string>('')
@@ -21,7 +53,7 @@ const fontSize = ref(60)
 const sungColor = ref('#f43f5e') // 玫瑰粉红
 const unsungColor = ref('#ffffff') // 纯白
 const strokeColor = ref('#000000') // 黑色描边
-const strokeWidth = ref(4)
+const strokeWidth = ref(0)
 const resolution = ref('1280x720') // 默认 720P
 
 // 辅助状态
@@ -41,7 +73,6 @@ const canvasRef = ref<HTMLCanvasElement | null>(null)
 let animationFrameId: number | null = null
 
 // 背景图缓存
-let bgImageElement: HTMLImageElement | null = null
 
 // ——— Web Audio API 句柄 (用于音频波形图和录制) ———
 let audioCtx: AudioContext | null = null
@@ -134,6 +165,9 @@ function onAudioUpload(event: Event) {
     }
     reader.readAsArrayBuffer(file)
 
+    // 智能回填封面大标题
+    coverTitle.value = file.name.replace(/\.[^/.]+$/, "")
+
     notify(`歌曲导入成功: ${file.name}`)
   }
 }
@@ -146,35 +180,290 @@ async function onLrcUpload(event: Event) {
     const text = await file.text()
     lrcContent.value = text
     lrcLines.value = parseLrc(text, duration.value)
+    // 智能回填封面小标题及大标题
+    const parts = file.name.replace(/\.[^/.]+$/, "").split(' - ')
+    if (parts.length > 1) {
+      coverSubtitle.value = parts[0]
+      if (!coverTitle.value) {
+        coverTitle.value = parts[1]
+      }
+    } else {
+      coverSubtitle.value = "未知歌手"
+    }
+
     notify(`歌词导入成功，解析出 ${lrcLines.value.length} 行歌词`)
   }
 }
 
-function onBgImageUpload(event: Event) {
-  const target = event.target as HTMLInputElement
-  const file = target.files?.[0]
-  if (file) {
-    bgImageFile.value = file
-    const reader = new FileReader()
-    reader.onload = (e) => {
-      const img = new Image()
-      img.onload = () => {
-        bgImageElement = img
-        drawFrame() // 重绘
-        notify('背景图片载入成功')
-      };
-      img.src = e.target?.result as string
-    };
-    reader.readAsDataURL(file)
+// ——— IndexedDB 本地图片持久化工具 ———
+const DB_NAME = 'LyricVideoMakerDB'
+const STORE_NAME = 'background_images'
+
+function openDB(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, 1)
+    request.onupgradeneeded = () => {
+      const db = request.result
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        db.createObjectStore(STORE_NAME, { keyPath: 'id' })
+      }
+    }
+    request.onsuccess = () => resolve(request.result)
+    request.onerror = () => reject(request.error)
+  })
+}
+
+async function saveImagesToDB(files: File[]) {
+  try {
+    const db = await openDB()
+    const tx = db.transaction(STORE_NAME, 'readwrite')
+    const store = tx.objectStore(STORE_NAME)
+    store.clear()
+    for (let i = 0; i < files.length; i++) {
+      store.put({ id: i, file: files[i], name: files[i].name })
+    }
+  } catch (e) {
+    console.error('保存背景图到 IndexedDB 失败:', e)
   }
 }
 
-function clearBgImage() {
-  bgImageFile.value = null
-  bgImageElement = null
-  drawFrame()
-  notify('背景图片已清除')
+async function loadImagesFromDB(): Promise<File[]> {
+  try {
+    const db = await openDB()
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, 'readonly')
+      const store = tx.objectStore(STORE_NAME)
+      const req = store.getAll()
+      req.onsuccess = () => {
+        const results = req.result || []
+        results.sort((a, b) => a.id - b.id)
+        resolve(results.map(r => r.file))
+      }
+      req.onerror = () => reject(req.error)
+    })
+  } catch (e) {
+    console.error('读取本地持久化背景图失败:', e)
+    return []
+  }
 }
+
+async function clearImagesDB() {
+  try {
+    const db = await openDB()
+    const tx = db.transaction(STORE_NAME, 'readwrite')
+    tx.objectStore(STORE_NAME).clear()
+  } catch (e) {
+    console.error('清空本地背景图缓存失败:', e)
+  }
+}
+
+async function onBgImagesUpload(event: Event) {
+  const target = event.target as HTMLInputElement
+  const files = Array.from(target.files || [])
+  if (files.length > 0) {
+    const startIdx = uploadedImageFiles.value.length
+    uploadedImageFiles.value = [...uploadedImageFiles.value, ...files]
+    
+    // 保存至本地 IndexedDB
+    await saveImagesToDB(uploadedImageFiles.value)
+    
+    let loadedCount = 0
+    files.forEach((file, index) => {
+      const url = URL.createObjectURL(file)
+      const targetIdx = startIdx + index
+      uploadedImageUrlList.value[targetIdx] = url
+      const img = new Image()
+      img.onload = () => {
+        uploadedImageElements.value[targetIdx] = img
+        loadedCount++
+        if (loadedCount === files.length) {
+          drawFrame()
+          notify(`成功追加并本地保存 ${files.length} 张背景图片`)
+        }
+      }
+      img.src = url
+    })
+  }
+}
+
+async function resetPresetImages() {
+  uploadedImageUrlList.value.forEach(url => {
+    if (url.startsWith('blob:')) {
+      URL.revokeObjectURL(url)
+    }
+  })
+  uploadedImageUrlList.value = []
+  uploadedImageElements.value = []
+  uploadedImageFiles.value = []
+  
+  // 清除本地图片缓存
+  await clearImagesDB()
+  
+  notify('正在下载并本地化 15 张预置背景大图...')
+  
+  const files: File[] = []
+  let loadedCount = 0
+  
+  async function checkAndSave() {
+    if (loadedCount === presetImageUrls.length) {
+      // 批量保存下载的图片对象到本地 IndexedDB
+      const validFiles = files.filter(Boolean)
+      if (validFiles.length > 0) {
+        uploadedImageFiles.value = validFiles
+        await saveImagesToDB(validFiles)
+        
+        // 重新生成 Blob URL，保证与持久化的 file 保持绑定一致
+        uploadedImageFiles.value.forEach((file, index) => {
+          if (uploadedImageUrlList.value[index] && uploadedImageUrlList.value[index].startsWith('blob:')) {
+            URL.revokeObjectURL(uploadedImageUrlList.value[index])
+          }
+          const blobUrl = URL.createObjectURL(file)
+          uploadedImageUrlList.value[index] = blobUrl
+          if (uploadedImageElements.value[index]) {
+            uploadedImageElements.value[index].src = blobUrl
+          }
+        })
+      }
+      drawFrame()
+      notify('默认背景大图已成功下载并缓存至本地！')
+    }
+  }
+  
+  for (let index = 0; index < presetImageUrls.length; index++) {
+    const url = presetImageUrls[index]
+    try {
+      // 采用 CORS fetch 图片并转为 Blob
+      const res = await fetch(url)
+      if (!res.ok) throw new Error('CORS fetch 失败')
+      const blob = await res.blob()
+      
+      const file = new File([blob], `preset_bg_${index + 1}.jpg`, { type: 'image/jpeg' })
+      files[index] = file
+      
+      const blobUrl = URL.createObjectURL(file)
+      uploadedImageUrlList.value[index] = blobUrl
+      
+      const img = new Image()
+      img.onload = () => {
+        uploadedImageElements.value[index] = img
+        loadedCount++
+        checkAndSave()
+      }
+      img.src = blobUrl
+    } catch (err) {
+      console.warn(`本地化预置图失败，降级回退: ${url}`, err)
+      // 降级退化：若下载失败（比如断网），直接用网络 URL 载入
+      uploadedImageUrlList.value[index] = url
+      const img = new Image()
+      img.crossOrigin = 'anonymous'
+      img.onload = async () => {
+        uploadedImageElements.value[index] = img
+        
+        // 通过 Canvas 将图片转为 Blob 并创建 File 对象
+        try {
+          const canvas = document.createElement('canvas')
+          canvas.width = img.naturalWidth || img.width || 1280
+          canvas.height = img.naturalHeight || img.height || 720
+          const ctx = canvas.getContext('2d')
+          if (ctx) {
+            ctx.drawImage(img, 0, 0)
+            const blob = await new Promise<Blob | null>(r => canvas.toBlob(r, 'image/jpeg', 0.95))
+            if (blob) {
+              const file = new File([blob], `preset_bg_${index + 1}.jpg`, { type: 'image/jpeg' })
+              files[index] = file
+            }
+          }
+        } catch (canvasErr) {
+          console.error('Canvas 转换预置图为 Blob 失败:', canvasErr)
+        }
+        
+        loadedCount++
+        checkAndSave()
+      }
+      img.src = url
+    }
+  }
+}
+
+async function clearUploadedImages() {
+  await resetPresetImages()
+}
+
+
+async function removeUploadedImage(index: number) {
+  if (uploadedImageUrlList.value[index] && uploadedImageUrlList.value[index].startsWith('blob:')) {
+    URL.revokeObjectURL(uploadedImageUrlList.value[index])
+  }
+  uploadedImageFiles.value.splice(index, 1)
+  uploadedImageUrlList.value.splice(index, 1)
+  uploadedImageElements.value.splice(index, 1)
+  
+  // 重新同步本地大图列表缓存
+  await saveImagesToDB(uploadedImageFiles.value)
+  
+  drawFrame()
+  notify('已删除该背景图片')
+}
+
+watch([bgColor, fontSize, strokeWidth, unsungColor, sungColor, resolution, textFont, bgMode, lrcLinesToShow, showCover, coverTitle, coverSubtitle], () => {
+  const data = {
+    bgColor: bgColor.value,
+    fontSize: fontSize.value,
+    strokeWidth: strokeWidth.value,
+    unsungColor: unsungColor.value,
+    sungColor: sungColor.value,
+    resolution: resolution.value,
+    textFont: textFont.value,
+    bgMode: bgMode.value,
+    lrcLinesToShow: lrcLinesToShow.value,
+    showCover: showCover.value,
+    coverTitle: coverTitle.value,
+    coverSubtitle: coverSubtitle.value,
+  }
+  localStorage.setItem('lyric_video_maker_configs', JSON.stringify(data))
+}, { deep: true })
+
+function onBgVideoUpload(event: Event) {
+  const target = event.target as HTMLInputElement
+  const file = target.files?.[0]
+  if (file) {
+    bgVideoFile.value = file
+    if (bgVideoUrl.value) {
+      URL.revokeObjectURL(bgVideoUrl.value)
+    }
+    bgVideoUrl.value = URL.createObjectURL(file)
+    notify('背景视频载入成功，已自动播放预览')
+    
+    setTimeout(() => {
+      if (bgVideoRef.value) {
+        bgVideoRef.value.currentTime = currentTime.value % bgVideoRef.value.duration || 0
+        bgVideoRef.value.play().catch(() => {})
+      }
+      drawFrame()
+    }, 100)
+  }
+}
+
+function clearBgVideo() {
+  bgVideoFile.value = null
+  if (bgVideoUrl.value) {
+    URL.revokeObjectURL(bgVideoUrl.value)
+  }
+  bgVideoUrl.value = ''
+  drawFrame()
+  notify('背景视频已清除')
+}
+
+watch(isPlaying, (newVal) => {
+  if (bgVideoRef.value && bgVideoUrl.value) {
+    if (newVal) {
+      bgVideoRef.value.currentTime = currentTime.value % bgVideoRef.value.duration || 0
+      bgVideoRef.value.play().catch(() => {})
+    } else {
+      bgVideoRef.value.pause()
+    }
+  }
+})
 
 // ——— Web Audio 初始化 ———
 function initWebAudio() {
@@ -221,6 +510,15 @@ function onAudioLoadedMetadata() {
 function onAudioTimeUpdate() {
   if (!audioRef.value) return
   currentTime.value = audioRef.value.currentTime
+  
+  // 同步背景视频进度
+  if (bgVideoRef.value && bgVideoUrl.value && !bgVideoRef.value.paused) {
+    const diff = Math.abs(bgVideoRef.value.currentTime - (currentTime.value % bgVideoRef.value.duration || 0))
+    if (diff > 0.3) {
+      bgVideoRef.value.currentTime = currentTime.value % bgVideoRef.value.duration || 0
+    }
+  }
+  
   drawFrame()
 }
 
@@ -284,7 +582,7 @@ function loop() {
 }
 
 // ——— 核心 Canvas 绘制逻辑 ———
-function drawFrame(timeOverride?: number) {
+async function drawFrame(timeOverride?: number, isRecordingFrame = false) {
   const canvas = canvasRef.value
   if (!canvas) return
   const ctx = canvas.getContext('2d')
@@ -293,96 +591,130 @@ function drawFrame(timeOverride?: number) {
   const W = canvas.width
   const H = canvas.height
 
-  // 1. 绘制背景
-  ctx.clearRect(0, 0, W, H)
-  if (bgImageElement) {
-    // 铺满剪裁绘制 (Cover)
-    const imgRatio = bgImageElement.width / bgImageElement.height
-    const canvasRatio = W / H
-    let dw, dh, dx, dy
-    if (imgRatio > canvasRatio) {
-      dh = H
-      dw = H * imgRatio
-      dx = (W - dw) / 2
-      dy = 0
-    } else {
-      dw = W
-      dh = W / imgRatio
-      dx = 0
-      dy = (H - dh) / 2
-    }
-    ctx.drawImage(bgImageElement, dx, dy, dw, dh)
-    
-    // 加一层半透明黑色蒙版让歌词更清晰
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.45)'
-    ctx.fillRect(0, 0, W, H)
-  } else {
-    // 纯色背景
-    ctx.fillStyle = bgColor.value
-    ctx.fillRect(0, 0, W, H)
-  }
-
   const timeNow = timeOverride !== undefined ? timeOverride : currentTime.value
   if (timeOverride !== undefined) {
     currentTime.value = timeOverride
   }
 
-  // 2. 绘制音频波形起伏线
-  let dataArray: Uint8Array | null = null
-  let bufferLength = 128
-  
-  if (timeOverride !== undefined && decodedAudioBuffer.value) {
-    // 离线状态：从 decodedAudioBuffer 中提取当前时间点附近的波形
-    const buffer = decodedAudioBuffer.value
-    const sampleRate = buffer.sampleRate
-    const channelData = buffer.getChannelData(0) // 使用左声道
-    const currentSample = Math.floor(timeNow * sampleRate)
+  // 1. 绘制背景
+  ctx.clearRect(0, 0, W, H)
+  if (bgVideoRef.value && bgVideoUrl.value) {
+    const video = bgVideoRef.value
     
-    bufferLength = 128
-    dataArray = new Uint8Array(bufferLength)
-    
-    for (let i = 0; i < bufferLength; i++) {
-      // 采样当前时间点附近的一小段音频数据 (采样间隔稍微拉开点以形成好看的波形)
-      const sampleIdx = currentSample + i * 16
-      if (sampleIdx < channelData.length && sampleIdx >= 0) {
-        const val = Math.abs(channelData[sampleIdx])
-        dataArray[i] = Math.min(255, Math.floor(val * 512)) // 放大一些以便显示
-      } else {
-        dataArray[i] = 0
-      }
+    // 如果是离线压制，设置 currentTime 并等待 seeked 解码完毕
+    if (isRecordingFrame) {
+      video.currentTime = timeNow % video.duration
+      await new Promise<void>((resolve) => {
+        const onSeeked = () => {
+          video.removeEventListener('seeked', onSeeked)
+          resolve()
+        }
+        video.addEventListener('seeked', onSeeked)
+        setTimeout(() => {
+          video.removeEventListener('seeked', onSeeked)
+          resolve()
+        }, 150) // 超时保护
+      })
     }
-  } else if (analyserNode) {
-    // 在线状态：从分析器读取实时频率
-    bufferLength = analyserNode.frequencyBinCount
-    dataArray = new Uint8Array(bufferLength)
-    analyserNode.getByteFrequencyData(dataArray as any)
-  }
-
-  if (dataArray) {
-    ctx.lineWidth = 3
-    ctx.strokeStyle = `rgba(244, 63, 94, 0.35)` // 半透明玫瑰粉
-    ctx.beginPath()
-
-    const sliceWidth = (W * 0.8) / bufferLength
-    const startX = W * 0.1
-    let x = startX
-    const yCenter = H * 0.8 // 在画面中下部绘制
-
-    for (let i = 0; i < bufferLength; i++) {
-      const v = dataArray[i] / 128.0
-      // 算出波形起伏值
-      const yOffset = (v - 1.0) * 80 * Math.sin((i / bufferLength) * Math.PI) // 两侧收窄，中部隆起
+    
+    const videoRatio = video.videoWidth / video.videoHeight || W / H
+    const canvasRatio = W / H
+    let dw, dh, dx, dy
+    if (videoRatio > canvasRatio) {
+      dh = H
+      dw = H * videoRatio
+      dx = (W - dw) / 2
+      dy = 0
+    } else {
+      dw = W
+      dh = W / videoRatio
+      dx = 0
+      dy = (H - dh) / 2
+    }
+    ctx.drawImage(video, dx, dy, dw, dh)
+    
+    // 加一层半透明黑色蒙版让歌词更清晰
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.45)'
+    ctx.fillRect(0, 0, W, H)
+  } else {
+    // 图片轮播背景 (默认)
+    const images = uploadedImageElements.value
+    
+    if (images.length > 0) {
+      const T = 15 // 每张图片展示15秒
+      const idx = Math.floor(timeNow / T) % images.length
+      const progress = (timeNow % T) / T
       
-      if (i === 0) {
-        ctx.moveTo(x, yCenter + yOffset)
+      const fadeDuration = 1.2
+      const fadeRatio = fadeDuration / T
+      
+      if (progress < fadeRatio && images.length > 1) {
+        const prevIdx = (idx - 1 + images.length) % images.length
+        const t_fade = progress / fadeRatio
+        const prevP = (T - fadeDuration + progress * T) / T
+        drawKenBurnsImage(ctx, images[prevIdx], prevP, 1 - t_fade)
+        drawKenBurnsImage(ctx, images[idx], progress, t_fade)
       } else {
-        ctx.lineTo(x, yCenter + yOffset)
+        drawKenBurnsImage(ctx, images[idx], progress, 1.0)
       }
-      x += sliceWidth
+      
+      // 加一层半透明黑色蒙版
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.45)'
+      ctx.fillRect(0, 0, W, H)
+    } else {
+      // 纯色背景
+      ctx.fillStyle = bgColor.value
+      ctx.fillRect(0, 0, W, H)
     }
-    ctx.lineTo(W * 0.9, yCenter)
-    ctx.stroke()
   }
+
+  // 1.5 绘制片头封面 (0s - 2s)
+  const COVER_DURATION = 2.0
+  const FADE_DURATION = 0.5 // 1.5s - 2.0s 为淡出区
+  
+  let drawLyricsAndWave = true
+  
+  if (showCover.value && timeNow < COVER_DURATION) {
+    const titleText = coverTitle.value || (audioFile.value ? audioFile.value.name.replace(/\.[^/.]+$/, "") : '未知歌曲')
+    const subtitleText = coverSubtitle.value || (lrcFile.value ? lrcFile.value.name.replace(/\.[^/.]+$/, "").split(' - ')[0] : '未知歌手')
+    
+    let coverAlpha = 1.0
+    if (timeNow > COVER_DURATION - FADE_DURATION) {
+      coverAlpha = (COVER_DURATION - timeNow) / FADE_DURATION
+    }
+    
+    if (timeNow < COVER_DURATION - FADE_DURATION) {
+      drawLyricsAndWave = false
+    }
+    
+    ctx.save()
+    ctx.globalAlpha = coverAlpha
+    
+    // 封面大毛玻璃磨砂背板
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.35)'
+    ctx.fillRect(0, 0, W, H)
+    
+    // 大标题 (歌曲名)
+    ctx.font = `bold ${Math.round(fontSize.value * 1.5)}px ${textFont.value}`
+    ctx.fillStyle = '#ffffff'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.5)'
+    ctx.shadowBlur = 10
+    ctx.shadowOffsetX = 2
+    ctx.shadowOffsetY = 2
+    ctx.fillText(titleText, W / 2, H / 2 - fontSize.value * 0.7)
+    
+    // 小标题 (歌手名)
+    ctx.font = `italic ${Math.round(fontSize.value * 0.8)}px ${textFont.value}`
+    ctx.fillStyle = '#cbd5e1'
+    ctx.fillText(subtitleText, W / 2, H / 2 + fontSize.value * 0.8)
+    
+    ctx.restore()
+  }
+
+  // 2. 绘制音频波形起伏线 (已根据用户要求移除)
+  if (!drawLyricsAndWave) return
 
   // 3. 绘制歌词 (三行滚动模式)
   if (lrcLines.value.length === 0) {
@@ -423,20 +755,46 @@ function drawFrame(timeOverride?: number) {
   const gap = fontSize.value * 1.6
   const centerY = H / 2
 
-  // 绘制上一行歌词
-  if (currentIdx > 0) {
-    const prevLine = lrcLines.value[currentIdx - 1]
-    drawStaticLine(ctx, prevLine.text, W / 2, centerY - gap, fontSize.value * 0.75, 'rgba(255, 255, 255, 0.4)')
-  }
+  if (lrcLinesToShow.value === 1) {
+    // 单行居中模式
+    const currLine = lrcLines.value[currentIdx]
+    drawKaraokeLine(ctx, currLine, W / 2, centerY, fontSize.value, timeNow)
+  } else if (lrcLinesToShow.value === 2) {
+    // 双行整页切换模式 (1、2行都唱完再切换)
+    const upperY = centerY - gap * 0.5
+    const lowerY = centerY + gap * 0.5
+    
+    const groupStartIdx = Math.floor(currentIdx / 2) * 2
+    const line1 = lrcLines.value[groupStartIdx]
+    const line2 = groupStartIdx + 1 < lrcLines.value.length ? lrcLines.value[groupStartIdx + 1] : null
+    
+    if (currentIdx === groupStartIdx) {
+      // 正在唱上行 (上行扫光，下行候场)
+      drawKaraokeLine(ctx, line1, W / 2, upperY, fontSize.value, timeNow)
+      if (line2) {
+        drawStaticLine(ctx, line2.text, W / 2, lowerY, fontSize.value, unsungColor.value)
+      }
+    } else {
+      // 正在唱下行 (上行唱完，保持已唱高亮色；下行扫光)
+      drawKaraokeLine(ctx, line1, W / 2, upperY, fontSize.value, line1.endTime + 1)
+      if (line2) {
+        drawKaraokeLine(ctx, line2, W / 2, lowerY, fontSize.value, timeNow)
+      }
+    }
+  } else {
+    // 三行滚动模式
+    if (currentIdx > 0) {
+      const prevLine = lrcLines.value[currentIdx - 1]
+      drawStaticLine(ctx, prevLine.text, W / 2, centerY - gap, fontSize.value * 0.75, 'rgba(255, 255, 255, 0.4)')
+    }
 
-  // 绘制当前行歌词 (核心：卡拉OK逐字亮起扫光效果)
-  const currLine = lrcLines.value[currentIdx]
-  drawKaraokeLine(ctx, currLine, W / 2, centerY, fontSize.value, timeNow)
+    const currLine = lrcLines.value[currentIdx]
+    drawKaraokeLine(ctx, currLine, W / 2, centerY, fontSize.value, timeNow)
 
-  // 绘制下一行歌词
-  if (currentIdx + 1 < lrcLines.value.length) {
-    const nextLine = lrcLines.value[currentIdx + 1]
-    drawStaticLine(ctx, nextLine.text, W / 2, centerY + gap, fontSize.value * 0.75, 'rgba(255, 255, 255, 0.55)')
+    if (currentIdx + 1 < lrcLines.value.length) {
+      const nextLine = lrcLines.value[currentIdx + 1]
+      drawStaticLine(ctx, nextLine.text, W / 2, centerY + gap, fontSize.value * 0.75, 'rgba(255, 255, 255, 0.55)')
+    }
   }
 }
 
@@ -457,6 +815,38 @@ function drawStaticLine(ctx: CanvasRenderingContext2D, text: string, x: number, 
   ctx.fillText(text, x, y)
 }
 
+// 辅助方法：绘制带 Ken Burns 动效的图片背景
+function drawKenBurnsImage(ctx: CanvasRenderingContext2D, img: HTMLImageElement, p: number, alpha: number) {
+  const W = ctx.canvas.width
+  const H = ctx.canvas.height
+  const imgRatio = img.width / img.height
+  const canvasRatio = W / H
+  
+  // 缓缓放大 (1.03x -> 1.13x)
+  const scale = 1.03 + p * 0.10
+  
+  // 缓缓平移
+  const moveX = (p - 0.5) * 30
+  const moveY = (p - 0.5) * 15
+
+  let dw, dh
+  if (imgRatio > canvasRatio) {
+    dh = H * scale
+    dw = H * scale * imgRatio
+  } else {
+    dw = W * scale
+    dh = (W * scale) / imgRatio
+  }
+  
+  const dx = (W - dw) / 2 + moveX
+  const dy = (H - dh) / 2 + moveY
+
+  ctx.save()
+  ctx.globalAlpha = alpha
+  ctx.drawImage(img, dx, dy, dw, dh)
+  ctx.restore()
+}
+
 // 辅助方法：绘制卡拉OK扫光逐字变色行
 function drawKaraokeLine(ctx: CanvasRenderingContext2D, line: LrcLine, x: number, y: number, fSize: number, timeNow: number) {
   const text = line.text
@@ -468,17 +858,17 @@ function drawKaraokeLine(ctx: CanvasRenderingContext2D, line: LrcLine, x: number
   const totalWidth = ctx.measureText(text).width
   const startX = x - totalWidth / 2
 
-  // 2. 首先渲染底层“未唱完”颜色的整行文字 (带描边)
+  // 2. 首先渲染底层描边 (如果设置了描边)
   if (strokeWidth.value > 0) {
     ctx.strokeStyle = strokeColor.value
     ctx.lineWidth = strokeWidth.value
     ctx.strokeText(text, x, y)
   }
-  ctx.fillStyle = unsungColor.value
-  ctx.fillText(text, x, y)
 
   // 3. 计算已唱文字的像素宽度 W_sung
   let sungWidth = 0
+  let allSung = true
+  let hasStarted = false
   
   for (const word of line.words) {
     const wordWidth = ctx.measureText(word.word).width
@@ -486,37 +876,43 @@ function drawKaraokeLine(ctx: CanvasRenderingContext2D, line: LrcLine, x: number
     if (timeNow >= word.end) {
       // 字唱完了，加上完整宽度
       sungWidth += wordWidth
+      hasStarted = true
     } else if (timeNow >= word.start) {
       // 字正在唱，按时间比例计算当前字内部的扫光进度
       const progress = (timeNow - word.start) / word.duration
       sungWidth += wordWidth * progress
+      allSung = false
+      hasStarted = true
       break // 后面字都还没唱到，停止累加
     } else {
+      allSung = false
       break
     }
   }
 
-  // 4. 如果已唱宽度大于 0，则把对应宽度的区域剪裁出来，并在里面用“已唱”颜色二次渲染
-  if (sungWidth > 0) {
-    ctx.save()
-    ctx.beginPath()
-    
-    // 裁剪矩形范围 (覆盖从 startX 开始，宽度为 sungWidth 的左侧唱过区域)
-    // 高度需完全包裹文字层
-    ctx.rect(startX, y - fSize, sungWidth, fSize * 2)
-    ctx.clip()
-
-    // 重新在相同位置以亮色绘制文字层 (同样需要包含描边，覆盖之前的黑色描边以防止锯齿)
-    if (strokeWidth.value > 0) {
-      ctx.strokeStyle = strokeColor.value
-      ctx.lineWidth = strokeWidth.value
-      ctx.strokeText(text, x, y)
-    }
-    ctx.fillStyle = sungColor.value
-    ctx.fillText(text, x, y)
-
-    ctx.restore()
+  // 4. 计算渐变比例，使用渐变填充渲染文字层 (避免双重绘制及裁切导致的抗锯齿白边)
+  let ratio = 0
+  if (allSung && hasStarted) {
+    ratio = 1
+  } else if (totalWidth > 0) {
+    ratio = Math.min(1, Math.max(0, sungWidth / totalWidth))
   }
+
+  if (ratio > 0) {
+    if (ratio >= 1) {
+      ctx.fillStyle = sungColor.value
+    } else {
+      const grad = ctx.createLinearGradient(startX, y, startX + totalWidth, y)
+      grad.addColorStop(0, sungColor.value)
+      grad.addColorStop(ratio, sungColor.value)
+      grad.addColorStop(ratio, unsungColor.value)
+      grad.addColorStop(1, unsungColor.value)
+      ctx.fillStyle = grad
+    }
+  } else {
+    ctx.fillStyle = unsungColor.value
+  }
+  ctx.fillText(text, x, y)
 }
 
 // ——— 核心合成录制逻辑 (修改为 WebCodecs 离线倍速压制版) ———
@@ -550,9 +946,9 @@ async function startRecording() {
       fps: 30,
       width: canvasWidth.value,
       height: canvasHeight.value,
-      drawFrameAtTime: (_, timestamp) => {
+      drawFrameAtTime: async (_, timestamp) => {
         // 传递 timestamp 给 drawFrame，实现非实时画面离线精确绘制
-        drawFrame(timestamp)
+        await drawFrame(timestamp, true)
       },
       onProgress: (progress) => {
         recordProgress.value = progress
@@ -590,13 +986,256 @@ watch([resolution, bgColor], () => {
   }, 10)
 })
 
-onMounted(() => {
+// ——— 在线音乐搜索弹窗状态 ———
+const showSearchDialog = ref(false)
+const showLrcPreview = ref(false)
+const searchKeyword = ref('')
+const searchLoading = ref(false)
+const searchResults = ref<any[]>([])
+const currentUsingHash = ref<string | null>(null) // 记录当前正在“下载使用”的歌曲 Hash
+const previewAudio = ref<HTMLAudioElement | null>(null)
+const previewHash = ref<string | null>(null) // 当前正在试听的歌曲 Hash
+
+// 打开搜索弹窗
+function openSearchDialog() {
+  showSearchDialog.value = true
+  searchKeyword.value = ''
+  searchResults.value = []
+}
+
+// 格式化时长（秒 -> 分:秒）
+function formatDuration(seconds: number) {
+  const m = Math.floor(seconds / 60)
+  const s = Math.floor(seconds % 60)
+  return `${m}:${String(s).padStart(2, '0')}`
+}
+
+// 在线搜索歌曲
+async function handleSearch() {
+  if (!searchKeyword.value.trim()) return
+  searchLoading.value = true
+  searchResults.value = []
+  try {
+    const res = await fetch(`http://localhost:8000/api/music/search?keyword=${encodeURIComponent(searchKeyword.value)}`)
+    const data = await res.json()
+    if (data.code === 200) {
+      searchResults.value = data.data
+    } else {
+      notify(data.message || '搜索失败')
+    }
+  } catch (error) {
+    console.error('搜索歌曲出错:', error)
+    notify('网络错误，搜索歌曲失败')
+  } finally {
+    searchLoading.value = false
+  }
+}
+
+// 试听/暂停试听
+function togglePreview(song: any) {
+  if (previewHash.value === song.hash) {
+    // 暂停
+    if (previewAudio.value) {
+      previewAudio.value.pause()
+      previewAudio.value = null
+    }
+    previewHash.value = null
+  } else {
+    // 播放新的
+    if (previewAudio.value) {
+      previewAudio.value.pause()
+    }
+    previewHash.value = song.hash
+    // 使用 HTMLAudioElement 播放
+    previewAudio.value = new Audio(`http://localhost:8000/api/music/audio-proxy?hash=${song.hash}`)
+    previewAudio.value.play().catch(e => {
+      console.error('试听失败:', e)
+      notify('该音频文件加载失败或无可用音源')
+      previewHash.value = null
+      previewAudio.value = null
+    })
+  }
+}
+
+// 使用该歌曲
+async function useSong(song: any) {
+  if (currentUsingHash.value) return
+  currentUsingHash.value = song.hash
+  
+  // 停止试听
+  if (previewAudio.value) {
+    previewAudio.value.pause()
+    previewAudio.value = null
+    previewHash.value = null
+  }
+
+  notify(`正在下载《${song.song_name}》歌词资源，请稍候...`)
+
+  let audioFileObj: File | null = null
+  let audioBlob: Blob | null = null
+  let audioSuccess = false
+
+  // 1. 尝试下载音频
+  try {
+    const audioRes = await fetch(`http://localhost:8000/api/music/audio-proxy?hash=${song.hash}`)
+    if (audioRes.ok) {
+      audioBlob = await audioRes.blob()
+      if (audioBlob.size > 100000) { // 大于 100KB 确认为音频
+        const fileName = `${song.singer_name} - ${song.song_name}.mp3`
+        audioFileObj = new File([audioBlob], fileName, { type: 'audio/mpeg' })
+        audioSuccess = true
+      }
+    }
+  } catch (e) {
+    console.error('音频下载失败:', e)
+  }
+
+  // 2. 下载歌词
+  let lyricText = ''
+  try {
+    const lrcUrl = `http://localhost:8000/api/music/lrc?hash=${song.hash}&song_name=${encodeURIComponent(song.song_name)}&artist_name=${encodeURIComponent(song.singer_name)}`
+    const lrcRes = await fetch(lrcUrl)
+    if (lrcRes.ok) {
+      const lrcData = await lrcRes.json()
+      if (lrcData.code === 200 && lrcData.lyric) {
+        lyricText = lrcData.lyric
+      }
+    }
+  } catch (e) {
+    console.error('歌词下载失败:', e)
+  }
+  
+  // 如果没有获取到歌词，生成一个提示性临时歌词
+  if (!lyricText) {
+    lyricText = `\x5b00:00.00\x5d${song.song_name} - ${song.singer_name}\n\x5b00:02.00\x5d（未能自动匹配到精准字轴歌词，请手动在这里编辑）\n`
+  }
+
+  const lrcFileObj = new File([lyricText], `${song.singer_name} - ${song.song_name}.lrc`, { type: 'text/plain' })
+
+  // 3. 填充歌词状态
+  lrcFile.value = lrcFileObj
+  lrcContent.value = lyricText
+
+  // 4. 填充音频状态 (仅在音频下载成功时)
+  if (audioSuccess && audioFileObj && audioBlob) {
+    audioFile.value = audioFileObj
+    if (audioRef.value) {
+      audioRef.value.pause()
+    }
+    audioUrl.value = URL.createObjectURL(audioFileObj)
+    isAudioLoaded.value = false
+    decodedAudioBuffer.value = null
+    
+    // 延迟 load 确保 Vue 已将 src 绑定到 DOM
+    setTimeout(() => {
+      audioRef.value?.load()
+    }, 50)
+
+    // 5. 解码音频为 AudioBuffer
+    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext
+    const ctx = new AudioContextClass()
+    try {
+      const arrayBuffer = await audioBlob.arrayBuffer()
+      decodedAudioBuffer.value = await ctx.decodeAudioData(arrayBuffer)
+    } catch (e) {
+      console.error('AudioBuffer 解码失败:', e)
+    } finally {
+      await ctx.close()
+    }
+
+    // 6. 解析歌词行
+    duration.value = song.duration || 200
+    lrcLines.value = parseLrc(lyricText, duration.value)
+
+    notify(`《${song.song_name}》音频与字轴歌词导入成功！`)
+  } else {
+    // 音频获取失败，仅导入歌词
+    duration.value = duration.value || song.duration || 240
+    lrcLines.value = parseLrc(lyricText, duration.value)
+    
+    notify(`歌词导入成功！但音频因版权保护未能下载，您可以自行上传本地音频匹配`)
+  }
+
+  // 智能回填封面大标题与小标题
+  coverTitle.value = song.song_name
+  coverSubtitle.value = song.singer_name
+
+  showSearchDialog.value = false
+
+  // 延迟重绘确保 DOM 完全就绪
+  setTimeout(() => {
+    drawFrame()
+  }, 200)
+
+  currentUsingHash.value = null
+}
+
+onMounted(async () => {
+  // 1. 从 localStorage 恢复用户配置
+  try {
+    const cached = localStorage.getItem('lyric_video_maker_configs')
+    if (cached) {
+      const data = JSON.parse(cached)
+      if (data.bgColor !== undefined) bgColor.value = data.bgColor
+      if (data.fontSize !== undefined) fontSize.value = data.fontSize
+      if (data.strokeWidth !== undefined) strokeWidth.value = data.strokeWidth
+      if (data.unsungColor !== undefined) unsungColor.value = data.unsungColor
+      if (data.sungColor !== undefined) sungColor.value = data.sungColor
+      if (data.resolution !== undefined) resolution.value = data.resolution
+      if (data.textFont !== undefined) textFont.value = data.textFont
+      if (data.bgMode !== undefined) bgMode.value = data.bgMode
+      if (data.lrcLinesToShow !== undefined) lrcLinesToShow.value = data.lrcLinesToShow
+      if (data.showCover !== undefined) showCover.value = data.showCover
+      if (data.coverTitle !== undefined) coverTitle.value = data.coverTitle
+      if (data.coverSubtitle !== undefined) coverSubtitle.value = data.coverSubtitle
+    }
+  } catch (e) {
+    console.error('还原配置缓存失败:', e)
+  }
+
+  // 2. 尝试从 IndexedDB 中恢复持久化的本地背景图片
+  try {
+    const cachedFiles = await loadImagesFromDB()
+    if (cachedFiles && cachedFiles.length > 0) {
+      uploadedImageFiles.value = cachedFiles
+      let loadedCount = 0
+      cachedFiles.forEach((file, index) => {
+        const url = URL.createObjectURL(file)
+        uploadedImageUrlList.value[index] = url
+        const img = new Image()
+        img.onload = () => {
+          uploadedImageElements.value[index] = img
+          loadedCount++
+          if (loadedCount === cachedFiles.length) {
+            drawFrame()
+          }
+        }
+        img.src = url
+      })
+      notify(`已从本地缓存还原 ${cachedFiles.length} 张背景图`)
+    } else {
+      // 否则加载默认 15 张图
+      resetPresetImages()
+    }
+  } catch (err) {
+    console.error('还原本地背景图缓存失败:', err)
+    resetPresetImages()
+  }
+
+  // 3. 绘制初始帧
   drawFrame()
 })
 
 onUnmounted(() => {
   if (animationFrameId) cancelAnimationFrame(animationFrameId)
   if (audioCtx) audioCtx.close()
+  if (previewAudio.value) {
+    previewAudio.value.pause()
+    previewAudio.value = null
+  }
+  if (bgVideoUrl.value) {
+    URL.revokeObjectURL(bgVideoUrl.value)
+  }
 })
 </script>
 
@@ -635,6 +1274,12 @@ onUnmounted(() => {
           </h2>
           
           <div class="flex flex-col gap-4">
+            <!-- 在线歌曲搜索下载按钮 -->
+            <button @click="openSearchDialog" class="w-full py-3 px-4 mb-2 rounded-2xl bg-gradient-to-r from-rose-500 to-orange-500 hover:from-rose-600 hover:to-orange-600 text-white font-bold text-sm shadow-lg shadow-rose-500/25 transition-all flex items-center justify-center gap-2 group cursor-pointer border-0">
+              <Icon icon="solar:music-library-bold" class="text-lg group-hover:scale-110 transition-transform" />
+              ✨ 在线搜索歌曲与字轴歌词
+            </button>
+
             <!-- 歌曲上传 -->
             <div>
               <label class="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">1. 上传音频 (.mp3/Wav)</label>
@@ -650,27 +1295,125 @@ onUnmounted(() => {
             <!-- 歌词上传 -->
             <div>
               <label class="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">2. 上传歌词 (.lrc)</label>
-              <div class="relative border-2 border-dashed border-slate-700 hover:border-rose-500/50 rounded-2xl p-4 flex flex-col items-center justify-center transition-all bg-slate-950/50 cursor-pointer overflow-hidden group">
-                <input type="file" accept=".lrc" @change="onLrcUpload" class="absolute inset-0 opacity-0 cursor-pointer" />
-                <Icon icon="solar:document-text-bold-duotone" class="text-3xl text-slate-500 group-hover:text-rose-400 transition-colors mb-2" />
-                <span class="text-sm font-semibold text-slate-300 truncate max-w-full">
-                  {{ lrcFile ? lrcFile.name : '点击选择或拖入歌词文件' }}
-                </span>
+              <div class="flex gap-2">
+                <div class="relative flex-1 border-2 border-dashed border-slate-700 hover:border-rose-500/50 rounded-2xl p-4 flex flex-col items-center justify-center transition-all bg-slate-950/50 cursor-pointer overflow-hidden group">
+                  <input type="file" accept=".lrc" @change="onLrcUpload" class="absolute inset-0 opacity-0 cursor-pointer" />
+                  <Icon icon="solar:document-text-bold-duotone" class="text-3xl text-slate-500 group-hover:text-rose-400 transition-colors mb-2" />
+                  <span class="text-sm font-semibold text-slate-300 truncate max-w-full">
+                    {{ lrcFile ? lrcFile.name : '点击选择或拖入歌词文件' }}
+                  </span>
+                </div>
+                <button v-if="lrcContent" @click="showLrcPreview = true" class="w-12 rounded-2xl bg-slate-950 border border-slate-700 hover:bg-rose-950/30 hover:border-rose-900 transition-all flex items-center justify-center text-rose-400 cursor-pointer">
+                  <Icon icon="solar:eye-bold" class="text-lg" />
+                </button>
               </div>
             </div>
 
-            <!-- 背景图上传 (可选) -->
+            <!-- 背景类型选择 -->
             <div>
-              <label class="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">3. 自定义背景图片 (可选)</label>
+              <label class="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">3. 背景类型 (图片轮播 vs 视频背景)</label>
+              <div class="grid grid-cols-2 gap-2 bg-slate-950 p-1 rounded-2xl border border-slate-800">
+                <button 
+                  type="button"
+                  @click="bgMode = 'image'; drawFrame()" 
+                  :class="[bgMode === 'image' ? 'bg-rose-500 text-white' : 'text-slate-400 hover:text-slate-200']"
+                  class="py-2 rounded-xl text-xs font-bold transition-all cursor-pointer border-0"
+                >
+                  图片模式 (Ken Burns 轮播)
+                </button>
+                <button 
+                  type="button"
+                  @click="bgMode = 'video'; drawFrame()" 
+                  :class="[bgMode === 'video' ? 'bg-rose-500 text-white' : 'text-slate-400 hover:text-slate-200']"
+                  class="py-2 rounded-xl text-xs font-bold transition-all cursor-pointer border-0"
+                >
+                  视频模式 (精确帧同步)
+                </button>
+              </div>
+            </div>
+
+            <!-- 背景图片上传 (若为图片模式) -->
+            <div v-if="bgMode === 'image'">
+              <label class="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
+                4. 自定义背景图片 (可选，可多选轮播)
+              </label>
               <div class="flex gap-2">
                 <div class="relative flex-1 border-2 border-dashed border-slate-700 hover:border-rose-500/50 rounded-2xl p-4 flex flex-col items-center justify-center transition-all bg-slate-950/50 cursor-pointer overflow-hidden group">
-                  <input type="file" accept="image/*" @change="onBgImageUpload" class="absolute inset-0 opacity-0 cursor-pointer" />
+                  <input type="file" accept="image/*" multiple @change="onBgImagesUpload" class="absolute inset-0 opacity-0 cursor-pointer" />
                   <Icon icon="solar:gallery-bold-duotone" class="text-3xl text-slate-500 group-hover:text-rose-400 transition-colors mb-2" />
                   <span class="text-sm font-semibold text-slate-300 truncate max-w-full">
-                    {{ bgImageFile ? bgImageFile.name : '上传背景大图' }}
+                    {{ uploadedImageFiles.length > 0 ? `已载入 ${uploadedImageFiles.length} 张背景图` : '默认使用 15 张预置大图循环' }}
                   </span>
                 </div>
-                <button v-if="bgImageFile" @click="clearBgImage" class="w-12 rounded-2xl bg-slate-950 border border-slate-700 hover:bg-rose-950/30 hover:border-rose-900 transition-all flex items-center justify-center text-rose-400">
+                <button v-if="uploadedImageFiles.length > 0" @click="clearUploadedImages" class="w-12 rounded-2xl bg-slate-950 border border-slate-700 hover:bg-rose-950/30 hover:border-rose-900 transition-all flex items-center justify-center text-rose-400 cursor-pointer">
+                  <Icon icon="solar:trash-bin-trash-bold" />
+                </button>
+              </div>
+
+              <!-- 背景大图列表及操作网格 -->
+              <div class="flex flex-col gap-3 mt-3 bg-slate-950/20 p-3 rounded-2xl border border-slate-800/80">
+                <div class="flex justify-between items-center">
+                  <span class="text-xs font-semibold text-slate-400">
+                    {{ uploadedImageUrlList.length > 0 ? '自定义轮播图列表 (悬浮可单张删除)' : '默认预置轮播图列表' }}
+                  </span>
+                  <!-- 一键重置预置图按钮 -->
+                  <button 
+                    v-if="uploadedImageUrlList.length > 0" 
+                    type="button"
+                    @click="clearUploadedImages" 
+                    class="text-xs font-bold text-rose-400 hover:text-rose-300 flex items-center gap-1 bg-transparent border-0 cursor-pointer transition-all p-0"
+                  >
+                    <Icon icon="solar:restart-bold" class="text-sm" />
+                    重置为预置图
+                  </button>
+                </div>
+
+                <!-- 5列缩略图网格 -->
+                <div class="grid grid-cols-5 gap-2">
+                  <template v-if="uploadedImageUrlList.length > 0">
+                    <div 
+                      v-for="(url, idx) in uploadedImageUrlList" 
+                      :key="url" 
+                      class="relative aspect-video rounded-lg overflow-hidden border border-slate-800 group"
+                    >
+                      <img :src="url" class="w-full h-full object-cover" />
+                      <!-- 单张图片删除悬浮按钮 -->
+                      <button 
+                        type="button"
+                        @click="removeUploadedImage(idx)" 
+                        class="absolute top-1 right-1 w-5 h-5 rounded-full bg-slate-950/80 hover:bg-rose-600 text-white flex items-center justify-center border-0 cursor-pointer opacity-0 group-hover:opacity-100 transition-opacity"
+                      >
+                        <Icon icon="solar:close-circle-bold" class="text-xs" />
+                      </button>
+                    </div>
+                  </template>
+                  <template v-else>
+                    <div 
+                      v-for="url in presetImageUrls" 
+                      :key="url" 
+                      class="aspect-video rounded-lg overflow-hidden border border-slate-800/60 opacity-80 hover:opacity-100 transition-opacity"
+                    >
+                      <img :src="url" class="w-full h-full object-cover" />
+                    </div>
+                  </template>
+                </div>
+              </div>
+            </div>
+
+            <!-- 背景视频上传 (若为视频模式) -->
+            <div v-if="bgMode === 'video'">
+              <label class="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
+                4. 自定义背景视频 (可选，单选)
+              </label>
+              <div class="flex gap-2">
+                <div class="relative flex-1 border-2 border-dashed border-slate-700 hover:border-rose-500/50 rounded-2xl p-4 flex flex-col items-center justify-center transition-all bg-slate-950/50 cursor-pointer overflow-hidden group">
+                  <input type="file" accept="video/*" @change="onBgVideoUpload" class="absolute inset-0 opacity-0 cursor-pointer" />
+                  <Icon icon="solar:videocamera-record-bold-duotone" class="text-3xl text-slate-500 group-hover:text-rose-400 transition-colors mb-2" />
+                  <span class="text-sm font-semibold text-slate-300 truncate max-w-full">
+                    {{ bgVideoFile ? bgVideoFile.name : '上传背景视频' }}
+                  </span>
+                </div>
+                <button v-if="bgVideoFile" @click="clearBgVideo" class="w-12 rounded-2xl bg-slate-950 border border-slate-700 hover:bg-rose-950/30 hover:border-rose-900 transition-all flex items-center justify-center text-rose-400 cursor-pointer">
                   <Icon icon="solar:trash-bin-trash-bold" />
                 </button>
               </div>
@@ -686,8 +1429,8 @@ onUnmounted(() => {
           </h2>
 
           <div class="flex flex-col gap-4">
-            <!-- 背景颜色 (如果无背景图) -->
-            <div v-if="!bgImageFile" class="flex justify-between items-center bg-slate-950/30 p-3 rounded-xl border border-slate-800">
+            <!-- 背景颜色 (如果无有效图片或视频) -->
+            <div v-if="bgMode === 'image' ? (uploadedImageFiles.length === 0) : !bgVideoFile" class="flex justify-between items-center bg-slate-950/30 p-3 rounded-xl border border-slate-800">
               <span class="text-sm font-semibold text-slate-300">纯色背景色</span>
               <input type="color" v-model="bgColor" class="w-12 h-8 rounded border-0 bg-transparent cursor-pointer" />
             </div>
@@ -743,6 +1486,35 @@ onUnmounted(() => {
                 </option>
               </select>
             </div>
+
+            <!-- 歌词展示行数 -->
+            <div class="flex flex-col gap-2">
+              <span class="text-sm font-semibold text-slate-300">歌词展示行数</span>
+              <select v-model.number="lrcLinesToShow" @change="drawFrame()" class="w-full bg-slate-950 text-slate-300 rounded-2xl border border-slate-800 p-3 outline-none focus:border-rose-500/50 cursor-pointer">
+                <option :value="1">单行居中模式</option>
+                <option :value="2">双行交替模式 (推荐)</option>
+                <option :value="3">三行滚动模式</option>
+              </select>
+            </div>
+
+            <!-- 片头封面配置 (大标题/小标题) -->
+            <div class="flex flex-col gap-4 border-t border-slate-800/80 pt-4">
+              <div class="flex justify-between items-center">
+                <span class="text-sm font-semibold text-slate-300">制作片头封面 (前2秒)</span>
+                <input type="checkbox" v-model="showCover" @change="drawFrame()" class="w-4 h-4 accent-rose-500 cursor-pointer" />
+              </div>
+              
+              <div v-if="showCover" class="flex flex-col gap-3 animate-fade-in">
+                <div class="flex flex-col gap-2">
+                  <span class="text-xs text-slate-400">大标题 (封面主标题，默认歌曲名)</span>
+                  <input type="text" v-model="coverTitle" @input="drawFrame()" placeholder="输入大标题" class="w-full bg-slate-950 text-slate-300 rounded-2xl border border-slate-800 p-3 outline-none focus:border-rose-500/50 text-sm" />
+                </div>
+                <div class="flex flex-col gap-2">
+                  <span class="text-xs text-slate-400">小标题 (封面副标题，默认歌手名)</span>
+                  <input type="text" v-model="coverSubtitle" @input="drawFrame()" placeholder="输入小标题" class="w-full bg-slate-950 text-slate-300 rounded-2xl border border-slate-800 p-3 outline-none focus:border-rose-500/50 text-sm" />
+                </div>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -778,6 +1550,16 @@ onUnmounted(() => {
               <span class="text-sm font-mono font-bold text-rose-400">{{ recordProgress }}%</span>
             </div>
           </div>
+
+          <!-- 背景视频播放器 (隐式，用于触发 Canvas 渲染) -->
+          <video 
+            ref="bgVideoRef" 
+            :src="bgVideoUrl" 
+            loop 
+            muted 
+            playsinline 
+            class="hidden"
+          ></video>
 
           <!-- 音频播放器 (隐式，用于触发 Web Audio Source) -->
           <audio 
@@ -866,6 +1648,129 @@ onUnmounted(() => {
             <div class="flex justify-end pt-2">
               <button @click="showOverflowModal = false" class="px-5 py-2.5 rounded-2xl bg-rose-500 hover:bg-rose-600 text-white font-bold text-sm cursor-pointer transition-all active:scale-95 border-0">
                 知道了
+              </button>
+            </div>
+          </div>
+        </div>
+      </Transition>
+
+      <!-- 在线歌曲搜索弹窗 (Modal) -->
+      <Transition name="modal-fade">
+        <div v-if="showSearchDialog" class="fixed inset-0 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4 z-50">
+          <div class="bg-slate-900 border border-slate-800 rounded-3xl p-6 w-full max-w-xl shadow-2xl flex flex-col gap-4 max-h-[85vh] animate-scale-up text-slate-100">
+            <!-- 头部 -->
+            <div class="flex justify-between items-center">
+              <h3 class="text-lg font-bold flex items-center gap-2">
+                <Icon icon="solar:music-note-slider-bold-duotone" class="text-rose-500 text-2xl" />
+                在线搜索歌曲 & 歌词
+              </h3>
+              <button @click="showSearchDialog = false" class="w-8 h-8 rounded-full bg-slate-800 border border-slate-700 hover:bg-rose-950/30 hover:border-rose-900 transition-all flex items-center justify-center text-slate-400 hover:text-rose-400 cursor-pointer">
+                <Icon icon="solar:close-circle-bold" class="text-lg" />
+              </button>
+            </div>
+
+            <!-- 搜索框 -->
+            <div class="flex gap-2">
+              <input 
+                type="text" 
+                v-model="searchKeyword" 
+                @keyup.enter="handleSearch"
+                placeholder="输入歌名、歌手，例如：得不到你的心" 
+                class="flex-1 bg-slate-950 border border-slate-800 hover:border-slate-700 focus:border-rose-500 rounded-2xl px-4 py-3 text-sm text-slate-100 outline-none transition-all placeholder:text-slate-500"
+              />
+              <button @click="handleSearch" :disabled="searchLoading" class="px-5 rounded-2xl bg-rose-500 hover:bg-rose-600 disabled:bg-slate-800 disabled:text-slate-600 text-white font-bold text-sm cursor-pointer transition-all flex items-center justify-center gap-1 border-0">
+                <Icon v-if="searchLoading" icon="svg-spinners:180-ring" class="text-sm" />
+                <span v-else>搜索</span>
+              </button>
+            </div>
+
+            <!-- 搜索结果列表 -->
+            <div class="flex-1 overflow-y-auto min-h-[300px] max-h-[450px] pr-1 flex flex-col gap-2">
+              <!-- 加载状态 -->
+              <div v-if="searchLoading" class="flex-1 flex flex-col items-center justify-center gap-2 py-10">
+                <Icon icon="svg-spinners:blocks-scale" class="text-4xl text-rose-500" />
+                <span class="text-sm text-slate-400 font-medium">正在检索在线曲库，请稍候...</span>
+              </div>
+
+              <!-- 空状态 -->
+              <div v-else-if="searchResults.length === 0" class="flex-1 flex flex-col items-center justify-center gap-2 py-12 text-slate-500">
+                <Icon icon="solar:music-notes-broken" class="text-5xl opacity-40 mb-1" />
+                <span class="text-sm font-semibold">
+                  {{ searchKeyword ? '没有搜到这首歌，换个词试试吧' : '输入歌名开始在线检索' }}
+                </span>
+              </div>
+
+              <!-- 结果渲染 -->
+              <template v-else>
+                <div 
+                  v-for="song in searchResults" 
+                  :key="song.hash"
+                  class="flex items-center justify-between p-3.5 bg-slate-950/40 hover:bg-slate-950/80 rounded-2xl border border-slate-800 hover:border-slate-700/80 transition-all group"
+                >
+                  <div class="flex items-center gap-3 min-w-0 flex-1">
+                    <!-- 试听按钮 -->
+                    <button 
+                      @click="togglePreview(song)"
+                      class="w-10 h-10 rounded-xl bg-slate-900 border border-slate-800 hover:border-rose-900 hover:bg-rose-950/30 flex items-center justify-center text-rose-500 transition-all cursor-pointer shadow-sm"
+                    >
+                      <Icon 
+                        :icon="previewHash === song.hash ? 'solar:pause-bold' : 'solar:play-bold'" 
+                        :class="previewHash === song.hash ? 'animate-pulse text-lg' : 'text-sm translate-x-[1px]'" 
+                      />
+                    </button>
+                    <!-- 歌名与歌手 -->
+                    <div class="min-w-0 flex-1">
+                      <p class="text-sm font-bold text-slate-200 truncate group-hover:text-rose-400 transition-colors">
+                        {{ song.song_name }}
+                      </p>
+                      <p class="text-xs text-slate-400 truncate mt-0.5">
+                        {{ song.singer_name }} · {{ formatDuration(song.duration) }}
+                      </p>
+                    </div>
+                  </div>
+
+                  <!-- 使用/下载按钮 -->
+                  <button 
+                    @click="useSong(song)"
+                    :disabled="currentUsingHash !== null"
+                    class="px-4 py-2 rounded-xl bg-slate-900 hover:bg-rose-500 border border-slate-800 hover:border-rose-500 disabled:opacity-40 text-slate-200 hover:text-white font-bold text-xs cursor-pointer transition-all active:scale-95 flex items-center gap-1.5"
+                  >
+                    <Icon v-if="currentUsingHash === song.hash" icon="svg-spinners:180-ring" class="text-xs" />
+                    <Icon v-else icon="solar:download-bold" class="text-xs" />
+                    {{ currentUsingHash === song.hash ? '解析中' : '使用' }}
+                  </button>
+                </div>
+              </template>
+            </div>
+
+            <div class="text-[10px] text-slate-500 text-center border-t border-slate-800/60 pt-3">
+              注：在线曲库功能仅供开发、测试及个人学习使用，禁止商用。
+            </div>
+          </div>
+        </div>
+      </Transition>
+
+      <!-- 歌词纯文本预览弹窗 (Modal) -->
+      <Transition name="modal-fade">
+        <div v-if="showLrcPreview" class="fixed inset-0 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4 z-50">
+          <div class="bg-slate-900 border border-slate-800 rounded-3xl p-6 w-full max-w-lg shadow-2xl flex flex-col gap-4 max-h-[80vh] animate-scale-up text-slate-100">
+            <div class="flex justify-between items-center">
+              <h3 class="text-lg font-bold flex items-center gap-2">
+                <Icon icon="solar:document-text-bold-duotone" class="text-rose-500 text-2xl" />
+                歌词内容预览
+              </h3>
+              <button @click="showLrcPreview = false" class="w-8 h-8 rounded-full bg-slate-800 border border-slate-700 hover:bg-rose-950/30 hover:border-rose-900 transition-all flex items-center justify-center text-slate-400 hover:text-rose-400 cursor-pointer">
+                <Icon icon="solar:close-circle-bold" class="text-lg" />
+              </button>
+            </div>
+            
+            <div class="flex-1 overflow-y-auto bg-slate-950/60 border border-slate-800 rounded-2xl p-4 font-mono text-sm leading-relaxed whitespace-pre max-h-[50vh] text-slate-300">
+              {{ lrcContent }}
+            </div>
+
+            <div class="flex justify-end gap-2">
+              <button @click="showLrcPreview = false" class="px-5 py-2.5 rounded-2xl bg-rose-500 hover:bg-rose-600 text-white font-bold text-sm cursor-pointer transition-all border-0">
+                关闭预览
               </button>
             </div>
           </div>
