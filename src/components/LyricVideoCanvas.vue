@@ -4,6 +4,10 @@ import { Icon } from '@iconify/vue'
 import { parseLrc, type LrcLine } from '../utils/lrcParser'
 import { FastVideoEncoder } from '../utils/FastVideoEncoder'
 
+// ——— 服务端 API 基础路径配置 ———
+const isDev = import.meta.env.DEV
+const API_BASE_URL = isDev ? '/api' : 'https://pyservice.pl-fe.cn/api'
+
 // ——— 音频和歌词文件状态 ———
 const audioFile = ref<File | null>(null)
 const lrcFile = ref<File | null>(null)
@@ -1016,7 +1020,7 @@ async function handleSearch() {
   searchLoading.value = true
   searchResults.value = []
   try {
-    const res = await fetch(`http://localhost:8000/api/music/search?keyword=${encodeURIComponent(searchKeyword.value)}`)
+    const res = await fetch(`${API_BASE_URL}/music/search?keyword=${encodeURIComponent(searchKeyword.value)}`)
     const data = await res.json()
     if (data.code === 200) {
       searchResults.value = data.data
@@ -1047,7 +1051,7 @@ function togglePreview(song: any) {
     }
     previewHash.value = song.hash
     // 使用 HTMLAudioElement 播放
-    previewAudio.value = new Audio(`http://localhost:8000/api/music/audio-proxy?hash=${song.hash}`)
+    previewAudio.value = new Audio(`${API_BASE_URL}/music/audio-proxy?hash=${song.hash}`)
     previewAudio.value.play().catch(e => {
       console.error('试听失败:', e)
       notify('该音频文件加载失败或无可用音源')
@@ -1077,7 +1081,7 @@ async function useSong(song: any) {
 
   // 1. 尝试下载音频
   try {
-    const audioRes = await fetch(`http://localhost:8000/api/music/audio-proxy?hash=${song.hash}`)
+    const audioRes = await fetch(`${API_BASE_URL}/music/audio-proxy?hash=${song.hash}`)
     if (audioRes.ok) {
       audioBlob = await audioRes.blob()
       if (audioBlob.size > 100000) { // 大于 100KB 确认为音频
@@ -1093,7 +1097,7 @@ async function useSong(song: any) {
   // 2. 下载歌词
   let lyricText = ''
   try {
-    const lrcUrl = `http://localhost:8000/api/music/lrc?hash=${song.hash}&song_name=${encodeURIComponent(song.song_name)}&artist_name=${encodeURIComponent(song.singer_name)}`
+    const lrcUrl = `${API_BASE_URL}/music/lrc?hash=${song.hash}&song_name=${encodeURIComponent(song.song_name)}&artist_name=${encodeURIComponent(song.singer_name)}`
     const lrcRes = await fetch(lrcUrl)
     if (lrcRes.ok) {
       const lrcData = await lrcRes.json()
