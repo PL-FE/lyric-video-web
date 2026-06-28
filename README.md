@@ -52,7 +52,7 @@
 
 ### 1. 克隆并安装依赖
 
-确保您的本地环境已安装了 [Node.js](https://nodejs.org/) 与 [pnpm](https://pnpm.io/)。
+确保您的本地环境已安装 [Node.js](https://nodejs.org/) 与 [pnpm](https://pnpm.io/)。
 
 ```bash
 # 切换到项目的根目录
