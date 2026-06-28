@@ -36,4 +36,4 @@ jobs:
         uses: JamesIves/github-pages-deploy-action@v4
         with:
           folder: dist # 打包产物目录
-          branch: gh-pages-dist # 产物存放的目标分支
+          branch: dist # 产物存放的目标分支
