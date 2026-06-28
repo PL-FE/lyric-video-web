@@ -26,8 +26,6 @@ const coverSubtitle = ref<string>('')
 const presetImageUrls = [
   './preset_bgs/bg1.jpg',
   './preset_bgs/bg2.jpg',
-  './preset_bgs/bg3.jpg',
-  './preset_bgs/bg4.jpg',
   './preset_bgs/bg5.jpg',
   './preset_bgs/bg6.jpg',
   './preset_bgs/bg7.jpg',
@@ -35,7 +33,6 @@ const presetImageUrls = [
   './preset_bgs/bg9.jpg',
   './preset_bgs/bg10.jpg',
   './preset_bgs/bg11.jpg',
-  './preset_bgs/bg12.jpg',
   './preset_bgs/bg13.jpg',
   './preset_bgs/bg14.jpg',
   './preset_bgs/bg15.jpg'
