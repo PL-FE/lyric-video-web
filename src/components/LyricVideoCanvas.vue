@@ -1616,7 +1616,10 @@ onUnmounted(() => {
 
       </div>
       
-      <!-- 溢出歌词详情弹窗 -->
+    </div>
+
+    <!-- 溢出歌词详情弹窗 -->
+    <Teleport to="body">
       <Transition name="modal-fade">
         <div v-if="showOverflowModal" class="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-md p-4">
           <div class="bg-slate-900 border border-slate-800 w-full max-w-lg rounded-3xl p-6 shadow-2xl flex flex-col gap-4 animate-scale-up">
@@ -1656,8 +1659,10 @@ onUnmounted(() => {
           </div>
         </div>
       </Transition>
+    </Teleport>
 
-      <!-- 在线歌曲搜索弹窗 (Modal) -->
+    <!-- 在线歌曲搜索弹窗 (Modal) -->
+    <Teleport to="body">
       <Transition name="modal-fade">
         <div v-if="showSearchDialog" class="fixed inset-0 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4 z-50">
           <div class="bg-slate-900 border border-slate-800 rounded-3xl p-6 w-full max-w-xl shadow-2xl flex flex-col gap-4 max-h-[85vh] animate-scale-up text-slate-100">
@@ -1752,8 +1757,10 @@ onUnmounted(() => {
           </div>
         </div>
       </Transition>
+    </Teleport>
 
-      <!-- 歌词纯文本预览弹窗 (Modal) -->
+    <!-- 歌词纯文本预览弹窗 (Modal) -->
+    <Teleport to="body">
       <Transition name="modal-fade">
         <div v-if="showLrcPreview" class="fixed inset-0 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4 z-50">
           <div class="bg-slate-900 border border-slate-800 rounded-3xl p-6 w-full max-w-lg shadow-2xl flex flex-col gap-4 max-h-[80vh] animate-scale-up text-slate-100">
@@ -1779,8 +1786,8 @@ onUnmounted(() => {
           </div>
         </div>
       </Transition>
+    </Teleport>
 
-    </div>
   </div>
 </template>
 
