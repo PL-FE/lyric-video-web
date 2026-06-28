@@ -4,9 +4,8 @@ import { Icon } from '@iconify/vue'
 import { parseLrc, type LrcLine } from '../utils/lrcParser'
 import { FastVideoEncoder } from '../utils/FastVideoEncoder'
 
-// ——— 服务端 API 基础路径配置 ———
-const isDev = import.meta.env.DEV
-const API_BASE_URL = isDev ? '/api' : 'https://pyservice.pl-fe.cn/api'
+// ——— 服务端 API 基础路径配置 (从环境变量读取) ———
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api'
 
 // ——— 音频和歌词文件状态 ———
 const audioFile = ref<File | null>(null)
