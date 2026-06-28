@@ -3,7 +3,7 @@ name: Deploy to GitHub Pages
 on:
   push:
     branches:
-      - main # 触发分支
+      - test # 触发分支
 
 permissions:
   contents: write # 必须赋予写权限以推送新分支
