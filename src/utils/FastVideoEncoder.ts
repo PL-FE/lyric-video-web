@@ -7,6 +7,7 @@ export interface FastVideoEncoderOptions {
   fps?: number;
   width: number;
   height: number;
+  bitrate?: number; // 比特率 (bps)
   drawFrameAtTime: (ctx: CanvasRenderingContext2D, time: number) => void | Promise<void>;
   onProgress?: (progress: number) => void;
 }
@@ -18,8 +19,10 @@ export class FastVideoEncoder {
   private fps: number;
   private width: number;
   private height: number;
+  private bitrate: number;
   private drawFrameAtTime: (ctx: CanvasRenderingContext2D, time: number) => void | Promise<void>;
   private onProgress?: (progress: number) => void;
+  private isCancelled = false;
 
   constructor(options: FastVideoEncoderOptions) {
     this.canvas = options.canvas;
@@ -29,8 +32,16 @@ export class FastVideoEncoder {
     // H.264 编码器要求分辨率宽度和高度必须为 2 的倍数（偶数）
     this.width = Math.floor(options.width / 2) * 2;
     this.height = Math.floor(options.height / 2) * 2;
+    this.bitrate = options.bitrate || 2_500_000; // 默认 2.5 Mbps
     this.drawFrameAtTime = options.drawFrameAtTime;
     this.onProgress = options.onProgress;
+  }
+
+  /**
+   * 中断/取消视频编码
+   */
+  public cancel(): void {
+    this.isCancelled = true;
   }
 
   /**
@@ -101,7 +112,7 @@ export class FastVideoEncoder {
       codec: 'avc1.42001f', // 更加通用的 H.264 Baseline Profile 3.1 编码参数类型（小写）
       width: this.width,
       height: this.height,
-      bitrate: 5_000_000, // 5 Mbps
+      bitrate: this.bitrate,
     });
 
     // 4. 配置音频编码器 (WebCodecs) - 仅在有音频时
@@ -130,6 +141,11 @@ export class FastVideoEncoder {
     const frameInterval = 1 / this.fps;
 
     for (let frameIndex = 0; frameIndex < totalFrames; frameIndex++) {
+      if (this.isCancelled) {
+        videoEncoder.close();
+        if (audioEncoder) audioEncoder.close();
+        throw new Error('Encoding cancelled');
+      }
       if (encoderError) {
         throw encoderError;
       }
@@ -179,6 +195,11 @@ export class FastVideoEncoder {
       const totalChunks = Math.ceil(totalAudioFrames / CHUNK_SIZE);
 
       for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+        if (this.isCancelled) {
+          videoEncoder.close();
+          if (audioEncoder) audioEncoder.close();
+          throw new Error('Encoding cancelled');
+        }
         if (encoderError) {
           throw encoderError;
         }

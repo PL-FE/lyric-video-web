@@ -57,6 +57,12 @@ const unsungColor = ref('#ffffff') // 纯白
 const strokeColor = ref('#000000') // 黑色描边
 const strokeWidth = ref(0)
 const resolution = ref('1280x720') // 默认 720P
+const videoQuality = ref('2500000') // 默认 2.5 Mbps
+const qualityOptions = [
+  { label: '超清画质 (4.0 Mbps - 适合1080P)', value: '4000000' },
+  { label: '高清画质 (2.5 Mbps - 推荐)', value: '2500000' },
+  { label: '标准画质 (1.5 Mbps - 节省空间)', value: '1500000' }
+]
 
 // 辅助状态
 const isPlaying = ref(false)
@@ -68,6 +74,9 @@ const isAudioLoaded = ref(false)
 const showNotification = ref(false)
 const notificationText = ref('')
 const showOverflowModal = ref(false)
+
+// 正在运行的离线视频编码器引用
+let currentEncoder: FastVideoEncoder | null = null
 
 // ——— DOM & 绘图句柄 ———
 const audioRef = ref<HTMLAudioElement | null>(null)
@@ -407,7 +416,7 @@ async function removeUploadedImage(index: number) {
   notify('已删除该背景图片')
 }
 
-watch([bgColor, fontSize, strokeWidth, unsungColor, sungColor, resolution, textFont, bgMode, lrcLinesToShow, showCover, coverTitle, coverSubtitle], () => {
+watch([bgColor, fontSize, strokeWidth, unsungColor, sungColor, resolution, textFont, bgMode, lrcLinesToShow, showCover, coverTitle, coverSubtitle, videoQuality], () => {
   const data = {
     bgColor: bgColor.value,
     fontSize: fontSize.value,
@@ -421,6 +430,7 @@ watch([bgColor, fontSize, strokeWidth, unsungColor, sungColor, resolution, textF
     showCover: showCover.value,
     coverTitle: coverTitle.value,
     coverSubtitle: coverSubtitle.value,
+    videoQuality: videoQuality.value,
   }
   localStorage.setItem('lyric_video_maker_configs', JSON.stringify(data))
 }, { deep: true })
@@ -948,6 +958,7 @@ async function startRecording() {
       fps: 30,
       width: canvasWidth.value,
       height: canvasHeight.value,
+      bitrate: parseInt(videoQuality.value),
       drawFrameAtTime: async (_, timestamp) => {
         // 传递 timestamp 给 drawFrame，实现非实时画面离线精确绘制
         await drawFrame(timestamp, true)
@@ -956,6 +967,7 @@ async function startRecording() {
         recordProgress.value = progress
       }
     })
+    currentEncoder = encoder
 
     // 3. 执行视频导出
     const videoBlob = await encoder.encode()
@@ -972,12 +984,25 @@ async function startRecording() {
 
     notify('视频合成完成，已触发下载！')
   } catch (error) {
-    console.error('合成失败:', error)
-    notify(`合成出错: ${error instanceof Error ? error.message : String(error)}`)
+    if (error instanceof Error && error.message === 'Encoding cancelled') {
+      notify('视频合成已取消')
+    } else {
+      console.error('合成失败:', error)
+      notify(`合成出错: ${error instanceof Error ? error.message : String(error)}`)
+    }
   } finally {
     isRecording.value = false
+    currentEncoder = null
     // 恢复画面预览
     drawFrame()
+  }
+}
+
+// 中断/停止合成
+function cancelRecording() {
+  if (currentEncoder) {
+    currentEncoder.cancel()
+    notify('正在停止并取消视频合成...')
   }
 }
 
@@ -995,6 +1020,7 @@ const searchKeyword = ref('')
 const searchLoading = ref(false)
 const searchResults = ref<any[]>([])
 const currentUsingHash = ref<string | null>(null) // 记录当前正在“下载使用”的歌曲 Hash
+const currentDownloadingHash = ref<string | null>(null) // 记录正在下载到本地的歌曲 Hash
 const previewAudio = ref<HTMLAudioElement | null>(null)
 const previewHash = ref<string | null>(null) // 当前正在试听的歌曲 Hash
 
@@ -1057,6 +1083,64 @@ function togglePreview(song: any) {
       previewAudio.value = null
     })
   }
+}
+
+// 下载歌曲音频和歌词到本地
+async function downloadOnlineMusic(song: any) {
+  if (currentDownloadingHash.value) return
+  currentDownloadingHash.value = song.hash
+
+  notify(`正在下载《${song.song_name}》音频与歌词到本地，请稍候...`)
+
+  let audioBlob: Blob | null = null
+  let audioSuccess = false
+
+  // 1. 尝试下载音频并保存
+  try {
+    const audioRes = await fetch(`${API_BASE_URL}/music/audio-proxy?hash=${song.hash}`)
+    if (audioRes.ok) {
+      audioBlob = await audioRes.blob()
+      if (audioBlob.size > 100000) { // 大于 100KB 确认为有效音频
+        const url = URL.createObjectURL(audioBlob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = `${song.singer_name} - ${song.song_name}.mp3`
+        a.click()
+        URL.revokeObjectURL(url)
+        audioSuccess = true
+      }
+    }
+  } catch (e) {
+    console.error('音频下载失败:', e)
+  }
+
+  // 2. 尝试下载歌词并保存
+  try {
+    const lrcUrl = `${API_BASE_URL}/music/lrc?hash=${song.hash}&song_name=${encodeURIComponent(song.song_name)}&artist_name=${encodeURIComponent(song.singer_name)}`
+    const lrcRes = await fetch(lrcUrl)
+    if (lrcRes.ok) {
+      const lrcData = await lrcRes.json()
+      if (lrcData.code === 200 && lrcData.lyric) {
+        const lrcBlob = new Blob([lrcData.lyric], { type: 'text/plain' })
+        const lrcUrlObj = URL.createObjectURL(lrcBlob)
+        const aLrc = document.createElement('a')
+        aLrc.href = lrcUrlObj
+        aLrc.download = `${song.singer_name} - ${song.song_name}.lrc`
+        aLrc.click()
+        URL.revokeObjectURL(lrcUrlObj)
+      }
+    }
+  } catch (e) {
+    console.error('下载歌词失败:', e)
+  }
+
+  if (audioSuccess) {
+    notify(`《${song.song_name}》及其歌词已成功下载到您的电脑！`)
+  } else {
+    notify('音频资源获取失败，请稍后重试')
+  }
+
+  currentDownloadingHash.value = null
 }
 
 // 使用该歌曲
@@ -1190,6 +1274,7 @@ onMounted(async () => {
       if (data.showCover !== undefined) showCover.value = data.showCover
       if (data.coverTitle !== undefined) coverTitle.value = data.coverTitle
       if (data.coverSubtitle !== undefined) coverSubtitle.value = data.coverSubtitle
+      if (data.videoQuality !== undefined) videoQuality.value = data.videoQuality
     }
   } catch (e) {
     console.error('还原配置缓存失败:', e)
@@ -1489,6 +1574,16 @@ onUnmounted(() => {
               </select>
             </div>
 
+            <!-- 导出画质 -->
+            <div class="flex flex-col gap-2">
+              <label class="block text-xs font-semibold text-slate-400 uppercase tracking-wider">输出视频画质</label>
+              <select v-model="videoQuality" class="w-full bg-slate-950 text-slate-300 rounded-2xl border border-slate-800 p-3 outline-none focus:border-rose-500/50 cursor-pointer">
+                <option v-for="opt in qualityOptions" :key="opt.value" :value="opt.value">
+                  {{ opt.label }}
+                </option>
+              </select>
+            </div>
+
             <!-- 歌词展示行数 -->
             <div class="flex flex-col gap-2">
               <span class="text-sm font-semibold text-slate-300">歌词展示行数</span>
@@ -1550,6 +1645,15 @@ onUnmounted(() => {
                 <div class="bg-gradient-to-r from-rose-500 to-orange-500 h-full rounded-full transition-all duration-300" :style="{ width: `${recordProgress}%` }"></div>
               </div>
               <span class="text-sm font-mono font-bold text-rose-400">{{ recordProgress }}%</span>
+
+              <!-- 停止合成按钮 -->
+              <button 
+                @click="cancelRecording" 
+                class="px-6 py-2.5 rounded-2xl bg-slate-800/80 hover:bg-slate-700/80 active:scale-95 transition-all text-xs font-bold text-slate-200 border border-slate-700/60 hover:border-slate-600 flex items-center gap-2 cursor-pointer mt-6"
+              >
+                <Icon icon="solar:stop-bold" class="text-sm text-rose-500" />
+                停止合成
+              </button>
             </div>
           </div>
 
@@ -1736,16 +1840,29 @@ onUnmounted(() => {
                     </div>
                   </div>
 
-                  <!-- 使用/下载按钮 -->
-                  <button 
-                    @click="useSong(song)"
-                    :disabled="currentUsingHash !== null"
-                    class="px-4 py-2 rounded-xl bg-slate-900 hover:bg-rose-500 border border-slate-800 hover:border-rose-500 disabled:opacity-40 text-slate-200 hover:text-white font-bold text-xs cursor-pointer transition-all active:scale-95 flex items-center gap-1.5"
-                  >
-                    <Icon v-if="currentUsingHash === song.hash" icon="svg-spinners:180-ring" class="text-xs" />
-                    <Icon v-else icon="solar:download-bold" class="text-xs" />
-                    {{ currentUsingHash === song.hash ? '解析中' : '使用' }}
-                  </button>
+                  <div class="flex items-center gap-1.5">
+                    <!-- 下载到本地按钮 -->
+                    <button 
+                      @click.stop="downloadOnlineMusic(song)"
+                      :disabled="currentDownloadingHash !== null"
+                      class="p-2 rounded-xl bg-slate-900 hover:bg-slate-800 hover:text-rose-400 border border-slate-800 disabled:opacity-40 text-slate-400 cursor-pointer transition-all active:scale-95 flex items-center justify-center"
+                      title="下载音频与歌词到本地"
+                    >
+                      <Icon v-if="currentDownloadingHash === song.hash" icon="svg-spinners:180-ring" class="text-sm" />
+                      <Icon v-else icon="solar:download-minimalistic-bold" class="text-sm" />
+                    </button>
+
+                    <!-- 使用/导入按钮 -->
+                    <button 
+                      @click="useSong(song)"
+                      :disabled="currentUsingHash !== null"
+                      class="px-4 py-2 rounded-xl bg-slate-900 hover:bg-rose-500 border border-slate-800 hover:border-rose-500 disabled:opacity-40 text-slate-200 hover:text-white font-bold text-xs cursor-pointer transition-all active:scale-95 flex items-center gap-1.5"
+                    >
+                      <Icon v-if="currentUsingHash === song.hash" icon="svg-spinners:180-ring" class="text-xs" />
+                      <Icon v-else icon="solar:import-bold" class="text-xs" />
+                      {{ currentUsingHash === song.hash ? '解析中' : '使用' }}
+                    </button>
+                  </div>
                 </div>
               </template>
             </div>
